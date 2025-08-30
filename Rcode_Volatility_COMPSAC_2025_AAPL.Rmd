@@ -1,0 +1,1317 @@
+---
+title: "Rcode_Volatility_COMPSAC_2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list=ls(all=TRUE)) # Remove objects from environment
+set.seed(123)
+```
+
+
+```{r}
+### Load Packages
+library(quantmod) ## To download data from Yahoo finance
+library(forecast) ## To fit ARIMA model
+library(ggplot2)  ## For lag plots
+library(gridExtra) ## For arranging multiple plots
+library(grid)      ## For grid.draw function
+library(tseries) ## For adf.test
+library(xtable) ## For Latex Tables
+library(writexl) ## Write Excel files
+
+library(dplyr)
+
+library(fpp3)            ## Loads all necessary packages, including fable, tsibble, etc.
+
+```
+
+
+Note: According to Yahoo Finance there are 11 sectors in the stock market in total, each with its own characteristics and features. Under each sector umbrella is a grouping of industries, which are represented by all the companies in that industry that trade on the stock market.
+
+Technology - 12 industries
+
+Financial Services - 15 industries
+
+Consumer Cyclical - 23 industries
+
+Healthcare - 11 industries
+
+Industrials - 25 industries
+
+Communication Services - 7 industries
+
+Consumer Defensive - 12 industries
+
+Energy - 8 industries
+
+Real Estate - 12 industries
+
+Basic Materials - 14 industries
+
+Utilities - 6 industries
+
+
+Here we are considering 10 stocks ('AAPL', 'BRK-B', 'AMZN', 'LLY', 'GE', 'WMT', 'TXGE', 'PLD', 'LIN', 'NEE') covering each sector for analysis (omit Sector6: Communication services). Stocks are choose with highest market capital.
+
+Note: Code is setup for one stock. Change the ticker symbol to get resulsts for other stocks.
+
+
+```{r}
+start_date <- '2020-03-11'
+end_date <- '2023-05-05'
+
+# Stock
+ticker <- 'AAPL'
+
+# Download data for each ticker and extract adjusted closing prices
+  price_data <- lapply(ticker, function(ticker) {
+    data <- getSymbols(ticker, src = 'yahoo', from = start_date, to = end_date, auto.assign = FALSE)
+    adj_close <- Ad(data)
+    colnames(adj_close) <- ticker # Rename column to the ticker symbol
+    return(adj_close)
+  })
+  
+# Combine the data into a single data frame
+stocks <- do.call(cbind, price_data)
+  
+# Convert to a data frame and remove rows with NA values
+asset <- as.data.frame(stocks)
+asset <- na.omit(asset)
+  
+# Ensure column names are correct
+colnames(asset) <- colnames(stocks)
+
+head(asset)
+
+```
+
+
+#### Price Diffrence Series ($P_{t}-P_{t-1}$)
+
+
+```{r}
+# calculate difference series
+
+data = asset
+lag = 1
+
+# Initialize a new data frame to store the lag differences
+Diff.Data <- data.frame(
+  lapply(data, function(column) {
+    diff(column, lag = lag) # Calculate the lag difference
+  })
+)
+  
+# Keep column names consistent with the original data
+colnames(Diff.Data) <- colnames(data)
+  
+# Update row names to align with the new data (dates after lag differences)
+rownames(Diff.Data) <- rownames(data)[(lag + 1):nrow(data)]
+
+head(Diff.Data)
+
+```
+
+
+#### Plot difference series
+
+```{r}
+library(ggplot2)
+
+# Prepare the data frame with dates as x-axis
+plot_data <- data.frame(
+  Date = as.Date(rownames(Diff.Data)),  # Convert row names to dates
+  Value = Diff.Data[[1]]  # Extract the single column
+)
+
+# Generate the plot
+p <- ggplot(plot_data, aes(x = Date, y = Value)) +
+  geom_line(color = "blue") +
+  labs(
+    title = "Time Series Plot", 
+    x = "Date", 
+    y = "Price Difference"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 10), # Center title
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 7)
+  )
+
+# Display the plot
+print(p)
+
+```
+
+
+
+#### Check Stationarity: Augmented Dickey-Fuller (ADF) test
+
+The Augmented Dickey-Fuller (ADF) test is a widely used statistical test for determining whether a time series is stationary.
+
+The ADF test is an extension of the Dickey-Fuller test and is specifically designed to address the issue of autocorrelation in the residuals of the time series. The test helps to:
+
+1. Check if a time series is stationary (specifically, if it is difference-stationary).
+
+2. Determine whether a unit root is present in the series.
+
+Null and Alternative Hypotheses
+Null Hypothesis: The time series has a unit root (i.e., it is non-stationary).
+Alternative Hypothesis: The time series does not have a unit root (i.e., it is stationary).
+
+If the p-value of the test is less than a chosen significance level (e.g., 0.05), you reject the null hypothesis, concluding that the series is stationary.
+
+
+```{r}
+# Set the significance level
+alpha <- 0.05
+
+# Perform the Augmented Dickey-Fuller (ADF) test on the single column
+adf_result <- tryCatch({
+  tseries::adf.test(Diff.Data[[1]])
+}, error = function(e) {
+  return(NULL) # Handle cases where the test cannot be performed
+})
+
+# Check if the test was successful
+if (!is.null(adf_result)) {
+  p_value <- adf_result$p.value
+  stationary <- ifelse(p_value < alpha, "Yes", "No")
+  
+  # Print the results
+  results <- data.frame(
+    Stock = "Diff.Data",
+    P_Value = p_value,
+    Stationary = stationary,
+    stringsAsFactors = FALSE
+  )
+  print(results)
+} else {
+  cat("ADF test failed. The test could not be performed.\n")
+}
+
+```
+
+
+
+#### Check Stationarity: Kwiatkowski-Phillips-Schmidt-Shin (KPSS) Test
+
+Purpose: Tests for stationarity around a deterministic trend.
+
+Method:
+Null Hypothesis: The series is stationary.
+Alternative: The series has a unit root.
+
+Scalability:
+Robust for large datasets but computationally heavier than ADF.
+
+
+```{r}
+# Set the significance level
+alpha <- 0.05
+
+# Perform the KPSS test on the single column
+kpss_result <- tryCatch({
+  tseries::kpss.test(Diff.Data[[1]])
+}, error = function(e) {
+  return(NULL) # Handle cases where the test cannot be performed
+})
+
+# Check if the test was successful
+if (!is.null(kpss_result)) {
+  p_value <- kpss_result$p.value
+  stationary <- ifelse(p_value > alpha, "Yes", "No") # For KPSS, higher p-values indicate stationarity
+  
+  # Print the results
+  results <- data.frame(
+    Stock = "Diff.Data",
+    P_Value = p_value,
+    Stationary = stationary,
+    stringsAsFactors = FALSE
+  )
+  print(results)
+} else {
+  cat("KPSS test failed. The test could not be performed.\n")
+}
+
+```
+
+
+
+#### Volatility ($\frac{|(P_{t}-P_{t-1}) - mean(P_{t}-P_{t-1})|}{\rho}$)
+
+
+```{r}
+# calculate sign correlation rho
+rho.cal<-function(X){
+  rho.hat<-cor(sign(X-mean(X)), X-mean(X))
+  return(rho.hat)
+}
+
+# Function for observed volatility
+observed.vol <- function(X){
+  return(abs(X - mean(X))/rho.cal(X))
+}
+
+Vol.Data = as.data.frame(apply(Diff.Data, MARGIN=2, FUN = observed.vol))
+
+head(Vol.Data)
+
+```
+
+
+#### Forecast Accuracy
+
+
+```{r}
+#### Vectors to save forecasts of each model for forecast combinations
+Drift.F = c()
+ARIMA.F = c()
+NNAR.F = c()
+LSTM1.F = c()
+XGB.F = c()
+LSTM2.F = c()
+
+```
+
+
+
+#### Volatility $\sim$ Lag of Volatility (Drift, ARIMA, nnetar, LSTM1, Xgboost, LSTM2, and Random Forest)
+
+
+```{r}
+# split date is '2023-02-05' (Start Date for the Testing Data)
+split_date <- as.Date("2023-02-05")  # Replace with your desired date
+
+# Filter data based on the split date
+train_data <- Vol.Data[row.names(Vol.Data) <= split_date, , drop = FALSE]
+test_data <- Vol.Data[row.names(Vol.Data) > split_date, , drop = FALSE]
+
+# Ensure row numbers correspond to dates
+row.names(train_data) <- row.names(Vol.Data[row.names(Vol.Data) <= split_date, , drop = FALSE])
+row.names(test_data) <- row.names(Vol.Data[row.names(Vol.Data) > split_date, , drop = FALSE])
+
+```
+
+
+
+#### Drift Model
+
+
+```{r}
+Drift_forecast <- rwf(train_data$AAPL, h = nrow(test_data), drift = TRUE)
+Drift.F = Drift_forecast$mean
+MAE.Drift = mean(abs(test_data$AAPL - Drift_forecast$mean))
+RMSE.Drift = sqrt(mean((test_data$AAPL - Drift_forecast$mean)^2))
+MAPE.Drift = mean(abs((test_data$AAPL - Drift_forecast$mean) / test_data$AAPL))*100
+```
+
+
+
+#### ARIMA Model
+
+
+```{r}
+arima_model <- auto.arima(train_data$AAPL)
+arima_model
+arima_forecast <- forecast(arima_model, h = nrow(test_data))
+ARIMA.F = arima_forecast$mean
+MAE.ARIMA = mean(abs(test_data$AAPL - arima_forecast$mean))
+RMSE.ARIMA = sqrt(mean((test_data$AAPL - arima_forecast$mean)^2))
+MAPE.ARIMA = mean(abs((test_data$AAPL - arima_forecast$mean) / test_data$AAPL))*100
+
+```
+
+
+#### NNAR Model
+
+
+```{r}
+nnetar_model <- nnetar(train_data$AAPL)
+nnetar_model
+nnetar_forecast <- forecast(nnetar_model, h = nrow(test_data))
+NNAR.F = nnetar_forecast$mean
+MAE.NNAR = mean(abs(test_data$AAPL - nnetar_forecast$mean))
+RMSE.NNAR = sqrt(mean((test_data$AAPL - nnetar_forecast$mean)^2))
+MAPE.NNAR = mean(abs((test_data$AAPL - nnetar_forecast$mean) / test_data$AAPL))*100
+
+```
+
+
+#### LSTM with Single Hidden Layer
+
+
+```{r}
+### Set path (For Windows computers)
+
+library(reticulate)
+use_python('C:/Users/sulal/AppData/Local/Programs/Python/Python38/Python.exe')
+
+library(keras)
+
+```
+
+
+
+```{r}
+# Initialize vectors for lags and number of neurons
+seriesLags <- 9
+No.neurons <- 5
+
+
+# Select the series
+series <- train_data$AAPL
+  
+# Normalize the data (this step is optional but recommended)
+min_val <- min(series)
+max_val <- max(series)
+scaled_series <- (series - min_val) / (max_val - min_val)
+  
+# Set up parameters for the current series
+lookback <- seriesLags  # Number of previous time steps used to predict the next one
+neurons <- No.neurons  # Number of neurons in the LSTM layer
+train_size <- length(scaled_series)
+forecast_length <- nrow(test_data)  # Same test data length for all series
+  
+# Function to create input-output pairs
+create_dataset <- function(data, lookback) {
+  X <- list()
+  y <- list()
+  for (j in seq(lookback, length(data) - 1)) {
+    X[[j - lookback + 1]] <- data[(j - lookback + 1):j]
+    y[[j - lookback + 1]] <- data[j + 1]
+  }
+  return(list(X = array(unlist(X), dim = c(length(X), lookback, 1)),
+                y = unlist(y)))
+}
+  
+# Create training data
+dataset <- create_dataset(scaled_series, lookback)
+X_train <- dataset$X
+y_train <- dataset$y
+  
+# Define the LSTM model for the current series
+LSTM.Model <- keras_model_sequential() %>%
+  layer_lstm(units = neurons, input_shape = c(lookback, 1)) %>%
+  layer_dense(units = 1)
+  
+# Compile the LSTM model
+LSTM.Model %>% compile(
+  optimizer = 'adam',
+  loss = 'mse'
+)
+  
+# Train the LSTM model
+LSTM.Model %>% fit(
+  X_train, y_train,
+  epochs = 20,
+  batch_size = 32, 
+  verbose = 0
+)
+  
+# Forecast the next Test.Length steps using the LSTM model
+lstm_predictions <- numeric(forecast_length)
+input_seq_lstm <- scaled_series[(train_size - lookback + 1):train_size]
+  
+for (j in 1:forecast_length) {
+  pred_input_lstm <- array(input_seq_lstm, dim = c(1, lookback, 1))
+  next_val_lstm <- LSTM.Model %>% predict(pred_input_lstm)
+  lstm_predictions[j] <- next_val_lstm
+    
+  # Update the input sequence
+  input_seq_lstm <- c(input_seq_lstm[-1], next_val_lstm)
+}
+  
+# Reverse scaling to original values for LSTM predictions
+fore.LSTM.Volatility <- lstm_predictions * (max_val - min_val) + min_val
+LSTM1.F = fore.LSTM.Volatility
+  
+# Calculate accuracy metrics
+MAE.LSTM1 <- mean(abs(test_data$AAPL - fore.LSTM.Volatility))
+RMSE.LSTM1 <- sqrt(mean((test_data$AAPL - fore.LSTM.Volatility)^2))
+MAPE.LSTM1 <- mean(abs(100 * (test_data$AAPL - fore.LSTM.Volatility) / test_data$AAPL))
+  
+```
+
+
+#### Xgboost
+
+```{r}
+library(xgboost)
+
+```
+
+
+```{r}
+# Select the series
+series <- train_data$AAPL
+  
+# Normalize the data
+min_val <- min(series)
+max_val <- max(series)
+scaled_series <- (series - min_val) / (max_val - min_val)
+  
+# Set up parameters for the current series
+lookback <- seriesLags  # Number of previous time steps used to predict the next one
+train_size <- length(scaled_series)
+forecast_length <- nrow(test_data)  # Same test data length for all series
+  
+# Create input-output pairs for training
+create_dataset <- function(data, lookback) {
+    X <- list()
+    y <- list()
+    for (j in seq(lookback, length(data) - 1)) {
+      X[[j - lookback + 1]] <- data[(j - lookback + 1):j]
+      y[[j - lookback + 1]] <- data[j + 1]
+    }
+    return(list(X = do.call(rbind, X), y = unlist(y)))
+  }
+  
+# Create training data
+dataset <- create_dataset(scaled_series, lookback)
+X_train <- dataset$X
+y_train <- dataset$y
+  
+# Train XGBoost model
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror", # Regression problem
+  eta = 0.1,                      # Learning rate
+  max_depth = 6,                  # Maximum depth of trees
+  subsample = 0.8,                # Subsample ratio of training data
+  colsample_bytree = 0.8          # Subsample ratio of columns
+)
+  
+xgb_model <- xgboost(
+  data = X_train,
+  label = y_train,
+  params = params,
+  nrounds = 100,
+  verbose = 0
+)
+  
+# Forecast the next forecast_length steps
+xgb_predictions <- numeric(forecast_length)
+input_seq_xgb <- scaled_series[(train_size - lookback + 1):train_size]
+  
+for (j in 1:forecast_length) {
+  pred_input_xgb <- matrix(input_seq_xgb, nrow = 1)
+  next_val_xgb <- predict(xgb_model, pred_input_xgb)
+  xgb_predictions[j] <- next_val_xgb
+    
+  # Update the input sequence
+  input_seq_xgb <- c(input_seq_xgb[-1], next_val_xgb)
+}
+  
+# Reverse scaling to original values for XGBoost predictions
+fore.XGB.Volatility <- xgb_predictions * (max_val - min_val) + min_val
+XGB.F = fore.XGB.Volatility
+  
+# Calculate accuracy metrics
+MAE.XGB <- mean(abs(test_data$AAPL - fore.XGB.Volatility))
+RMSE.XGB <- sqrt(mean((test_data$AAPL - fore.XGB.Volatility)^2))
+MAPE.XGB <- mean(abs(100 * (test_data$AAPL - fore.XGB.Volatility) / test_data$AAPL))
+  
+```
+
+
+#### LSTM with Two Hidden Layers
+
+
+```{r}
+# Select the series
+series <- train_data$AAPL
+  
+# Normalize the data (this step is optional but recommended)
+min_val <- min(series)
+max_val <- max(series)
+scaled_series <- (series - min_val) / (max_val - min_val)
+  
+# Set up parameters for the current series
+lookback <- seriesLags  # Number of previous time steps used to predict the next one
+neurons <- No.neurons  # Number of neurons in the LSTM layer
+train_size <- length(scaled_series)
+forecast_length <- nrow(test_data)  # Same test data length for all series
+  
+# Function to create input-output pairs
+create_dataset <- function(data, lookback) {
+  X <- list()
+  y <- list()
+  for (j in seq(lookback, length(data) - 1)) {
+    X[[j - lookback + 1]] <- data[(j - lookback + 1):j]
+    y[[j - lookback + 1]] <- data[j + 1]
+  }
+  return(list(X = array(unlist(X), dim = c(length(X), lookback, 1)),
+                y = unlist(y)))
+}
+  
+# Create training data
+dataset <- create_dataset(scaled_series, lookback)
+X_train <- dataset$X
+y_train <- dataset$y
+  
+# Define the LSTM model with two hidden layers
+LSTM.Model <- keras_model_sequential() %>%
+  layer_lstm(units = neurons, input_shape = c(lookback, 1), return_sequences = TRUE) %>%
+    layer_lstm(units = neurons, return_sequences = FALSE) %>%
+    layer_dense(units = 1)
+  
+# Compile the LSTM model
+LSTM.Model %>% compile(
+  optimizer = 'adam',
+  loss = 'mse'
+)
+  
+# Train the LSTM model
+LSTM.Model %>% fit(
+  X_train, y_train, 
+  epochs = 20, 
+  batch_size = 32, 
+  verbose = 0
+)
+  
+# Forecast the next Test.Length steps using the LSTM model
+lstm_predictions <- numeric(forecast_length)
+input_seq_lstm <- scaled_series[(train_size - lookback + 1):train_size]
+  
+for (j in 1:forecast_length) {
+  pred_input_lstm <- array(input_seq_lstm, dim = c(1, lookback, 1))
+  next_val_lstm <- LSTM.Model %>% predict(pred_input_lstm)
+  lstm_predictions[j] <- next_val_lstm
+    
+  # Update the input sequence
+  input_seq_lstm <- c(input_seq_lstm[-1], next_val_lstm)
+}
+  
+# Reverse scaling to original values for LSTM predictions
+fore.LSTM.Volatility <- lstm_predictions * (max_val - min_val) + min_val
+LSTM2.F = fore.LSTM.Volatility
+  
+# Calculate accuracy metrics
+MAE.LSTM2 <- mean(abs(test_data$AAPL - fore.LSTM.Volatility))
+RMSE.LSTM2 <- sqrt(mean((test_data$AAPL - fore.LSTM.Volatility)^2))
+MAPE.LSTM2 <- mean(abs(100 * (test_data$AAPL - fore.LSTM.Volatility) / test_data$AAPL))
+  
+```
+
+
+
+#### Random Forest
+
+```{r}
+library(randomForest)
+
+```
+
+
+
+```{r}
+# Select the series
+series <- train_data$AAPL
+
+# Normalize the data (optional but recommended)
+min_val <- min(series)
+max_val <- max(series)
+scaled_series <- (series - min_val) / (max_val - min_val)
+
+# Create lagged features
+create_lagged_features <- function(data, lags) {
+  lagged_data <- embed(data, lags + 1)
+  X <- lagged_data[, -1, drop = FALSE]
+  y <- lagged_data[, 1]
+  return(list(X = X, y = y))
+}
+
+# Create training data
+train_lagged <- create_lagged_features(scaled_series, seriesLags)
+X_train <- train_lagged$X
+y_train <- train_lagged$y
+
+# Train Random Forest model
+rf_model <- randomForest(X_train, y_train, ntree = 500)
+
+# Forecast for the testing period
+forecast_length <- nrow(test_data)
+rf_predictions <- numeric(forecast_length)
+input_seq_rf <- scaled_series[(length(scaled_series) - seriesLags + 1):length(scaled_series)]
+
+for (i in 1:forecast_length) {
+  pred_input_rf <- matrix(input_seq_rf, nrow = 1)
+  next_val_rf <- predict(rf_model, pred_input_rf)
+  rf_predictions[i] <- next_val_rf
+  
+  # Update the input sequence
+  input_seq_rf <- c(input_seq_rf[-1], next_val_rf)
+}
+
+# Reverse scaling to original values for RF predictions
+fore.RF.Volatility <- rf_predictions * (max_val - min_val) + min_val
+RF.F <- fore.RF.Volatility
+
+# Calculate accuracy metrics
+MAE.RF <- mean(abs(test_data$AAPL - fore.RF.Volatility))
+RMSE.RF <- sqrt(mean((test_data$AAPL - fore.RF.Volatility)^2))
+MAPE.RF <- mean(abs(100 * (test_data$AAPL - fore.RF.Volatility) / test_data$AAPL))
+
+```
+
+
+
+
+#### Forecast Summary
+
+
+```{r}
+MAE <- c(MAE.Drift, MAE.ARIMA, MAE.NNAR, MAE.LSTM1, MAE.XGB, MAE.LSTM2, MAE.RF)
+RMSE <- c(RMSE.Drift, RMSE.ARIMA, RMSE.NNAR, RMSE.LSTM1, RMSE.XGB, RMSE.LSTM2, RMSE.RF)
+MAPE <- c(MAPE.Drift, MAPE.ARIMA, MAPE.NNAR, MAPE.LSTM1, MAPE.XGB, MAPE.LSTM2, MAPE.RF)
+Model <- c('Drift', 'ARIMA', 'NNAR', 'LSTM1', 'XGB', 'LSTM2', 'RF')
+Forecast.Accuracy.Ind <- data.frame(Model, MAE, RMSE, MAPE)
+xtable(Forecast.Accuracy.Ind, digits = 3)
+
+write_xlsx(Forecast.Accuracy.Ind,"Volatility.Forecast.Accuracy.Ind_AAPL.xlsx")
+  
+```
+
+
+
+#### Plot Forecasts of 7 Models
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(reshape2)
+
+```
+
+
+```{r}
+# Create a data frame for plotting
+data <- data.frame(
+  Date = seq_along(test_data[, 1]),  # Replace with actual dates if available
+  Volatility = as.numeric(test_data$AAPL),
+  Drift = as.numeric(Drift.F),
+  ARIMA = as.numeric(ARIMA.F),
+  NNAR = as.numeric(NNAR.F),
+  LSTM1 = as.numeric(LSTM1.F),
+  XGB = as.numeric(XGB.F),
+  LSTM2 = as.numeric(LSTM2.F),
+  RF = as.numeric(RF.F)
+)
+
+# Reshape data for ggplot
+plot_data <- reshape2::melt(data, id.vars = "Date", variable.name = "Model", value.name = "Value")
+
+# Create individual plot
+p <- ggplot(plot_data, aes(x = Date, y = Value, color = Model)) +
+  geom_line(size = 1) +
+  scale_color_manual(
+    values = c(
+      "Volatility" = "black", 
+      "Drift" = "pink",
+      "ARIMA" = "brown",  # Match the updated ARIMA color
+      "NNAR" = "blue", 
+      "LSTM1" = "green", 
+      "XGB" = "purple", 
+      "LSTM2" = "orange", 
+      "RF" = "yellow"
+    )
+  ) +
+  labs(
+    title = ticker, 
+    x = "Date", 
+    y = "Volatility"  # Updated y-axis label for consistency
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank()  # Remove "Model" from legend title
+  )
+
+# Display the plot in the plotting window
+print(p)
+
+```
+
+
+
+
+
+
+#### Plot Forecasts of 7 Models with training and testing data
+
+```{r}
+# Define the training and testing periods
+train_length <- length(train_data$AAPL)
+test_length <- length(test_data$AAPL)
+cutoff <- train_length  # The point where training ends and testing begins
+
+# Create a continuous sequence of dates for both training and testing periods
+dates <- seq.Date(from = as.Date("2020-03-11"), by = "day", length.out = train_length + test_length)
+
+# Create a data frame for observed data (training and testing)
+data <- data.frame(
+  Date = dates,
+  Value = c(as.numeric(train_data$AAPL), as.numeric(test_data$AAPL)),
+  Type = "Volatility"  # Unified label for both training and testing periods
+)
+
+# Add forecast data for the testing period
+forecast_data <- data.frame(
+  Date = dates[(cutoff + 1):(cutoff + test_length)],  # Forecast dates match testing period
+  Drift = as.numeric(Drift.F),
+  ARIMA = as.numeric(ARIMA.F),
+  NNAR = as.numeric(NNAR.F),
+  LSTM1 = as.numeric(LSTM1.F),
+  XGB = as.numeric(XGB.F),
+  LSTM2 = as.numeric(LSTM2.F),
+  RF = as.numeric(RF.F)
+)
+
+# Reshape forecast data for ggplot
+forecast_data_melt <- reshape2::melt(forecast_data, id.vars = "Date", variable.name = "Model", value.name = "Value")
+
+# Combine observed data and forecasts
+observed_data <- data.frame(Date = data$Date, Value = data$Value, Model = data$Type)
+combined_data <- rbind(observed_data, forecast_data_melt)
+
+# Create the plot
+p <- ggplot(combined_data, aes(x = Date, y = Value, color = Model)) +
+  geom_line(size = 1) +
+  geom_vline(xintercept = as.numeric(dates[cutoff]), linetype = "dashed", color = "red", size = 1) +  # Enhanced vertical line
+  annotate("text", x = dates[cutoff] - 60, y = max(combined_data$Value) * 1.05, 
+           label = "Training", color = "red", angle = 0, hjust = 0.5) +  # Horizontal Training Period
+  annotate("text", x = dates[cutoff] + 50, y = max(combined_data$Value) * 1.05, 
+           label = "Testing", color = "red", angle = 0, hjust = 0.5) +  # Horizontal Testing Period
+  scale_color_manual(
+    values = c(
+      "Volatility" = "black", 
+      "Drift" = "pink",
+      "ARIMA" = "brown",  # Changed ARIMA color
+      "NNAR" = "blue", 
+      "LSTM1" = "green", 
+      "XGB" = "purple", 
+      "LSTM2" = "orange", 
+      "RF" = "yellow"
+    )
+  ) +
+  labs(title = ticker, x = "Date", y = "Volatility") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank()  # Remove "Model" from legend title
+  )
+
+# Display the plot in the plotting window
+print(p)
+
+```
+
+
+```{r}
+# Define the training and testing periods
+train_length <- length(train_data$AAPL)
+test_length <- length(test_data$AAPL)
+cutoff <- train_length  # The point where training ends and testing begins
+
+# Create a continuous sequence of dates for both training and testing periods
+dates <- seq.Date(from = as.Date("2020-03-11"), by = "day", length.out = train_length + test_length)
+
+# Create a data frame for observed data (training and testing)
+data <- data.frame(
+  Date = dates,
+  Value = c(as.numeric(train_data$AAPL), as.numeric(test_data$AAPL)),
+  Type = "Volatility"  # Unified label for both training and testing periods
+)
+
+# Add forecast data for the testing period
+forecast_data <- data.frame(
+  Date = dates[(cutoff + 1):(cutoff + test_length)],  # Forecast dates match testing period
+  Drift = as.numeric(Drift.F),
+  ARIMA = as.numeric(ARIMA.F),
+  NNAR = as.numeric(NNAR.F),
+  LSTM1 = as.numeric(LSTM1.F),
+  XGB = as.numeric(XGB.F),
+  LSTM2 = as.numeric(LSTM2.F),
+  RF = as.numeric(RF.F)
+)
+
+# Reshape forecast data for ggplot
+forecast_data_melt <- reshape2::melt(forecast_data, id.vars = "Date", variable.name = "Model", value.name = "Value")
+
+# Combine observed data and forecasts
+observed_data <- data.frame(Date = data$Date, Value = data$Value, Model = data$Type)
+combined_data <- rbind(observed_data, forecast_data_melt)
+
+# Create the plot
+p <- ggplot(combined_data, aes(x = Date, y = Value, color = Model)) +
+  geom_line(size = 1) +
+  geom_vline(xintercept = as.numeric(dates[cutoff]), linetype = "dashed", color = "red", size = 1) +  # Enhanced vertical line
+  annotate("text", x = dates[cutoff] - 60, y = max(combined_data$Value) * 1.05, 
+           label = "Training", color = "black", angle = 0, hjust = 0.5) +  # Horizontal Training Label
+  annotate("segment", 
+           x = dates[cutoff] - 80, xend = dates[cutoff] - 40,  # Longer arrow under "Training"
+           y = max(combined_data$Value) * 1.00, yend = max(combined_data$Value) * 1.00, 
+           color = "red", arrow = arrow(length = unit(0.2, "cm"), ends = "first")) +
+  annotate("text", x = dates[cutoff] + 50, y = max(combined_data$Value) * 1.05, 
+           label = "Testing", color = "black", angle = 0, hjust = 0.5) +  # Horizontal Testing Label
+  annotate("segment", 
+           x = dates[cutoff] + 20, xend = dates[cutoff] + 60,  # Longer arrow under "Testing"
+           y = max(combined_data$Value) * 1.00, yend = max(combined_data$Value) * 1.00, 
+           color = "red", arrow = arrow(length = unit(0.2, "cm"), ends = "last")) +
+  scale_color_manual(
+    values = c(
+      "Volatility" = "black", 
+      "Drift" = "pink",
+      "ARIMA" = "brown",  # Changed ARIMA color
+      "NNAR" = "blue", 
+      "LSTM1" = "green", 
+      "XGB" = "purple", 
+      "LSTM2" = "orange", 
+      "RF" = "yellow"
+    )
+  ) +
+  labs(title = ticker, x = "Date", y = "Volatility") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank()  # Remove "Model" from legend title
+  )
+
+# Display the plot in the plotting window
+print(p)
+
+
+```
+
+
+#### Forecast Combinations
+
+
+```{r}
+#### Two Models
+
+### Function to calculate MAE, RMSE, and MAPE for two models
+calculate_forecast_errors <- function(name, actual, forecast1, forecast2) {
+  # Combine the two forecast series into one by averaging
+  combined_forecast <- (forecast1 + forecast2) / 2
+  
+  # Calculate forecast errors
+  MAE <- mean(abs(actual - combined_forecast), na.rm = TRUE)
+  RMSE <- sqrt(mean((actual - combined_forecast)^2, na.rm = TRUE))
+  MAPE <- mean(abs(100 * (actual - combined_forecast) / actual), na.rm = TRUE)
+  
+  # Return the results as a data frame
+  result <- data.frame(
+    Model = name,
+    MAE = MAE,
+    RMSE = RMSE,
+    MAPE = MAPE
+  )
+  
+  return(result)
+}
+
+
+#### Drift and ARIMA
+Drift.ARIMA <- calculate_forecast_errors('Drift.ARIMA', test_data$AAPL, Drift.F, ARIMA.F)
+
+#### Drift and NNAR
+Drift.NNAR <- calculate_forecast_errors('Drift.NNAR', test_data$AAPL, Drift.F, NNAR.F)
+
+#### Drift and LSTM1
+Drift.LSTM1 <- calculate_forecast_errors('Drift.LSTM1', test_data$AAPL, Drift.F, LSTM1.F)
+
+#### Drift and XGB
+Drift.XGB <- calculate_forecast_errors('Drift.XGB', test_data$AAPL, Drift.F, XGB.F)
+
+#### Drift and LSTM2
+Drift.LSTM2 <- calculate_forecast_errors('Drift.LSTM2', test_data$AAPL, Drift.F, LSTM2.F)
+
+#### Drift and RF
+Drift.RF <- calculate_forecast_errors('Drift.RF', test_data$AAPL, Drift.F, RF.F)
+
+#### ARIMA and NNAR
+ARIMA.NNAR <- calculate_forecast_errors('ARIMA.NNAR', test_data$AAPL, ARIMA.F, NNAR.F)
+
+#### ARIMA and LSTM
+ARIMA.LSTM1 <- calculate_forecast_errors('ARIMA.LSTM1', test_data$AAPL, ARIMA.F, LSTM1.F)
+
+#### ARIMA and XGB
+ARIMA.XGB <- calculate_forecast_errors('ARIMA.XGB', test_data$AAPL, ARIMA.F, XGB.F)
+
+#### ARIMA and LSTM2
+ARIMA.LSTM2 <- calculate_forecast_errors('ARIMA.LSTM2', test_data$AAPL, ARIMA.F, LSTM2.F)
+
+#### ARIMA and RF
+ARIMA.RF <- calculate_forecast_errors('ARIMA.RF', test_data$AAPL, ARIMA.F, RF.F)
+
+#### NNAR and LSTM1
+NNAR.LSTM1 <- calculate_forecast_errors('NNAR.LSTM1', test_data$AAPL, NNAR.F, LSTM1.F)
+
+#### NNAR and XGB
+NNAR.XGB <- calculate_forecast_errors('NNAR.XGB', test_data$AAPL, NNAR.F, XGB.F)
+
+#### NNAR and LSTM2
+NNAR.LSTM2 <- calculate_forecast_errors('NNAR.LSTM2', test_data$AAPL, NNAR.F, LSTM2.F)
+
+#### NNAR and RF
+NNAR.RF <- calculate_forecast_errors('NNAR.RF', test_data$AAPL, NNAR.F, RF.F)
+
+#### LSTM1 and XGB
+LSTM1.XGB <- calculate_forecast_errors('LSTM1.XGB', test_data$AAPL, LSTM1.F, XGB.F)
+
+#### LSTM1 and LSTM2
+LSTM1.LSTM2 <- calculate_forecast_errors('LSTM1.LSTM2', test_data$AAPL, LSTM1.F, LSTM2.F)
+
+#### LSTM1 and RF
+LSTM1.RF <- calculate_forecast_errors('LSTM1.RF', test_data$AAPL, LSTM1.F, RF.F)
+
+#### XGB and LSTM2
+XGB.LSTM2 <- calculate_forecast_errors('XGB.LSTM2', test_data$AAPL, XGB.F, LSTM2.F)
+
+#### XGB and RF
+XGB.RF <- calculate_forecast_errors('XGB.RF', test_data$AAPL, XGB.F, RF.F)
+
+#### Summary - Two Models
+Forecast.Accuracy.Two <- rbind.data.frame(Drift.ARIMA, Drift.NNAR, Drift.LSTM1, Drift.XGB, Drift.LSTM2, Drift.RF, ARIMA.NNAR, ARIMA.LSTM1, ARIMA.XGB, ARIMA.LSTM2, ARIMA.RF, NNAR.LSTM1, NNAR.XGB, NNAR.LSTM2, NNAR.RF, LSTM1.XGB, LSTM1.LSTM2, LSTM1.RF, XGB.LSTM2, XGB.RF)
+xtable(Forecast.Accuracy.Two, digits = 3)
+
+write_xlsx(Forecast.Accuracy.Two,"Volatility.Forecast.Accuracy.Equal.Weight_AAPL.xlsx")
+
+```
+
+
+#### Summary of all models (individual and two)
+
+```{r}
+Summary <- rbind.data.frame(Forecast.Accuracy.Ind, Forecast.Accuracy.Two)
+
+xtable(Summary, digits = 3)
+
+```
+
+
+#### Optimal Weights for the Combinations (two models)
+
+
+```{r}
+#### Function to find Optimal weights
+find_optimal_weight <- function(name1, name2, Obs, Fore1, Fore2) {
+  # Define the sequence of weights to evaluate
+  Weight <- seq(0.01, 0.99, 0.01)
+  SSE_Weight <- rep(0, length(Weight))
+  T <- length(Obs)
+  
+  # Loop over each weight and calculate the SSE
+  for (i in 1:length(Weight)) {
+    Fore <- Weight[i] * Fore1 + (1 - Weight[i]) * Fore2
+    SSE <- 0
+    
+    for (j in 1:T) {
+      SSE <- SSE + (Obs[j] - Fore[j])^2
+    }
+    
+    SSE_Weight[i] <- SSE
+  }
+  
+  # Find the optimal weight
+  Weight.Opt <- Weight[which.min(SSE_Weight)]
+  
+  # Create the return data frame
+  result <- data.frame(
+    Model = paste(name1, name2, sep = "."),
+    Weight.Opt = Weight.Opt,
+    Complement.Weight = 1 - Weight.Opt
+  )
+  
+  colnames(result)[2:3] <- c('Model 1 Weight', 'Model 2 Weight')
+  
+  # Create a data frame for plotting
+  plot_data <- data.frame(Weight = Weight, SSE_Weight = SSE_Weight)
+  
+  # Plot SSE_Weight against Weight
+  p <- ggplot(plot_data, aes(x = Weight, y = SSE_Weight)) +
+    geom_line(color = "blue", size = 1) +
+    labs(
+      title = paste(name1, name2, sep = "."),
+      x = "Weight",
+      y = "Forecast Error Sum of Squares (FESS)"
+    ) +
+    theme_minimal()
+  
+  print(p)
+  
+  return(result)
+}
+
+
+#### Drift and ARIMA
+optimal_weights.Drift.ARIMA <- find_optimal_weight("Drift", "ARIMA", test_data$AAPL, Drift.F, ARIMA.F)
+
+#### Drift and NNAR
+optimal_weights.Drift.NNAR <- find_optimal_weight("Drift", "NNAR", test_data$AAPL, Drift.F, NNAR.F)
+
+#### Drift and LSTM1
+optimal_weights.Drift.LSTM1 <- find_optimal_weight("Drift", "LSTM1", test_data$AAPL, Drift.F, LSTM1.F)
+
+#### Drift and XGB
+optimal_weights.Drift.XGB <- find_optimal_weight("Drift", "XGB", test_data$AAPL, Drift.F, XGB.F)
+
+#### Drift and LSTM2
+optimal_weights.Drift.LSTM2 <- find_optimal_weight("Drift", "LSTM2", test_data$AAPL, Drift.F, LSTM2.F)
+
+#### Drift and RF
+optimal_weights.Drift.RF <- find_optimal_weight("Drift", "RF", test_data$AAPL, Drift.F, RF.F)
+
+#### ARIMA and NNAR
+optimal_weights.ARIMA.NNAR <- find_optimal_weight("ARIMA", "NNAR", test_data$AAPL, ARIMA.F, NNAR.F)
+
+#### ARIMA and LSTM
+optimal_weights.ARIMA.LSTM1 <- find_optimal_weight("ARIMA", "LSTM1", test_data$AAPL, ARIMA.F, LSTM1.F)
+
+#### ARIMA and XGB
+optimal_weights.ARIMA.XGB <- find_optimal_weight("ARIMA", "XGB", test_data$AAPL, ARIMA.F, XGB.F)
+
+#### ARIMA and LSTM2
+optimal_weights.ARIMA.LSTM2 <- find_optimal_weight("ARIMA", "LSTM2", test_data$AAPL, ARIMA.F, LSTM2.F)
+
+#### ARIMA and RF
+optimal_weights.ARIMA.RF <- find_optimal_weight("ARIMA", "RF", test_data$AAPL, ARIMA.F, RF.F)
+
+#### NNAR and LSTM1
+optimal_weights.NNAR.LSTM1 <- find_optimal_weight("NNAR", "LSTM1", test_data$AAPL, NNAR.F, LSTM1.F)
+
+#### NNAR and XGB
+optimal_weights.NNAR.XGB <- find_optimal_weight("NNAR", "XGB", test_data$AAPL, NNAR.F, XGB.F)
+
+#### NNAR and LSTM2
+optimal_weights.NNAR.LSTM2 <- find_optimal_weight("NNAR", "LSTM2", test_data$AAPL, NNAR.F, LSTM2.F)
+
+#### NNAR and RF
+optimal_weights.NNAR.RF <- find_optimal_weight("NNAR", "RF", test_data$AAPL, NNAR.F, RF.F)
+
+#### LSTM1 and XGB
+optimal_weights.LSTM1.XGB <- find_optimal_weight("LSTM1", "XGB", test_data$AAPL, LSTM1.F, XGB.F)
+
+#### LSTM1 and LSTM2
+optimal_weights.LSTM1.LSTM2 <- find_optimal_weight("LSTM1", "LSTM2", test_data$AAPL, LSTM1.F, LSTM2.F)
+
+#### LSTM1 and RF
+optimal_weights.LSTM1.RF <- find_optimal_weight("LSTM1", "RF", test_data$AAPL, LSTM1.F, RF.F)
+
+#### XGB and LSTM2
+optimal_weights.XGB.LSTM2 <- find_optimal_weight("XGB", "LSTM2", test_data$AAPL, XGB.F, LSTM2.F)
+
+#### XGB and RF
+optimal_weights.XGB.RF <- find_optimal_weight("XGB", "RF", test_data$AAPL, XGB.F, RF.F)
+
+#### Summary - Two Models
+optimal_weights.Two <- rbind.data.frame(optimal_weights.Drift.ARIMA, optimal_weights.Drift.NNAR, optimal_weights.Drift.LSTM1, optimal_weights.Drift.XGB, optimal_weights.Drift.LSTM2, optimal_weights.Drift.RF, optimal_weights.ARIMA.NNAR, optimal_weights.ARIMA.LSTM1, optimal_weights.ARIMA.XGB, optimal_weights.ARIMA.LSTM2, optimal_weights.ARIMA.RF, optimal_weights.NNAR.LSTM1, optimal_weights.NNAR.XGB, optimal_weights.NNAR.LSTM2, optimal_weights.NNAR.RF, optimal_weights.LSTM1.XGB, optimal_weights.LSTM1.LSTM2, optimal_weights.LSTM1.RF, optimal_weights.XGB.LSTM2, optimal_weights.XGB.RF)
+xtable(optimal_weights.Two, digits = 2)
+
+xtable(optimal_weights.Two)
+
+```
+
+
+
+#### Forecast Accuracies with Optimal Weights
+
+```{r}
+### Function to calculate MAE, RMSE, and MAPE for two models with custom weights
+calculate_forecast_errors.Opt <- function(name, actual, forecast1, forecast2, X) {
+
+    # Combine the two forecast series using weights
+  combined_forecast <- X * forecast1 + (1 - X) * forecast2
+  
+  # Calculate forecast errors
+  MAE <- mean(abs(actual - combined_forecast), na.rm = TRUE)
+  RMSE <- sqrt(mean((actual - combined_forecast)^2, na.rm = TRUE))
+  MAPE <- mean(abs(100 * (actual - combined_forecast) / actual), na.rm = TRUE)
+  
+  # Return the results as a data frame
+  result <- data.frame(
+    Model = name,
+    MAE = MAE,
+    RMSE = RMSE,
+    MAPE = MAPE
+  )
+  
+  return(result)
+}
+
+
+#### Drift and ARIMA
+Drift.ARIMA <- calculate_forecast_errors.Opt('Drift.ARIMA', test_data$AAPL, Drift.F, ARIMA.F, optimal_weights.Two[1,2])
+
+#### Drift and NNAR
+Drift.NNAR <- calculate_forecast_errors.Opt('Drift.NNAR', test_data$AAPL, Drift.F, NNAR.F, optimal_weights.Two[2,2])
+
+#### Drift and LSTM1
+Drift.LSTM1 <- calculate_forecast_errors.Opt('Drift.LSTM1', test_data$AAPL, Drift.F, LSTM1.F, optimal_weights.Two[3,2])
+
+#### Drift and XGB
+Drift.XGB <- calculate_forecast_errors.Opt('Drift.XGB', test_data$AAPL, Drift.F, XGB.F, optimal_weights.Two[4,2])
+
+#### Drift and LSTM2
+Drift.LSTM2 <- calculate_forecast_errors.Opt('Drift.LSTM2', test_data$AAPL, Drift.F, LSTM2.F, optimal_weights.Two[5,2])
+
+#### Drift and RF
+Drift.RF <- calculate_forecast_errors.Opt('Drift.RF', test_data$AAPL, Drift.F, RF.F, optimal_weights.Two[6,2])
+
+#### ARIMA and NNAR
+ARIMA.NNAR <- calculate_forecast_errors.Opt('ARIMA.NNAR', test_data$AAPL, ARIMA.F, NNAR.F, optimal_weights.Two[7,2])
+
+#### ARIMA and LSTM
+ARIMA.LSTM1 <- calculate_forecast_errors.Opt('ARIMA.LSTM1', test_data$AAPL, ARIMA.F, LSTM1.F, optimal_weights.Two[8,2])
+
+#### ARIMA and XGB
+ARIMA.XGB <- calculate_forecast_errors.Opt('ARIMA.XGB', test_data$AAPL, ARIMA.F, XGB.F, optimal_weights.Two[9,2])
+
+#### ARIMA and LSTM2
+ARIMA.LSTM2 <- calculate_forecast_errors.Opt('ARIMA.LSTM2', test_data$AAPL, ARIMA.F, LSTM2.F, optimal_weights.Two[10,2])
+
+#### ARIMA and RF
+ARIMA.RF <- calculate_forecast_errors.Opt('ARIMA.RF', test_data$AAPL, ARIMA.F, RF.F, optimal_weights.Two[11,2])
+
+#### NNAR and LSTM1
+NNAR.LSTM1 <- calculate_forecast_errors.Opt('NNAR.LSTM1', test_data$AAPL, NNAR.F, LSTM1.F, optimal_weights.Two[12,2])
+
+#### NNAR and XGB
+NNAR.XGB <- calculate_forecast_errors.Opt('NNAR.XGB', test_data$AAPL, NNAR.F, XGB.F, optimal_weights.Two[13,2])
+
+#### NNAR and LSTM2
+NNAR.LSTM2 <- calculate_forecast_errors.Opt('NNAR.LSTM2', test_data$AAPL, NNAR.F, LSTM2.F, optimal_weights.Two[14,2])
+
+#### NNAR and RF
+NNAR.RF <- calculate_forecast_errors.Opt('NNAR.RF', test_data$AAPL, NNAR.F, RF.F, optimal_weights.Two[15,2])
+
+#### LSTM1 and XGB
+LSTM1.XGB <- calculate_forecast_errors.Opt('LSTM1.XGB', test_data$AAPL, LSTM1.F, XGB.F, optimal_weights.Two[16,2])
+
+#### LSTM1 and LSTM2
+LSTM1.LSTM2 <- calculate_forecast_errors.Opt('LSTM1.LSTM2', test_data$AAPL, LSTM1.F, LSTM2.F, optimal_weights.Two[17,2])
+
+#### LSTM1 and RF
+LSTM1.RF <- calculate_forecast_errors.Opt('LSTM1.RF', test_data$AAPL, LSTM1.F, RF.F, optimal_weights.Two[18,2])
+
+#### XGB and LSTM2
+XGB.LSTM2 <- calculate_forecast_errors.Opt('XGB.LSTM2', test_data$AAPL, XGB.F, LSTM2.F, optimal_weights.Two[19,2])
+
+#### XGB and RF
+XGB.RF <- calculate_forecast_errors.Opt('XGB.RF', test_data$AAPL, XGB.F, RF.F, optimal_weights.Two[20,2])
+
+#### Summary - Two Models
+Forecast.Accuracy.Two.Opt <- rbind.data.frame(Drift.ARIMA, Drift.NNAR, Drift.LSTM1, Drift.XGB, Drift.LSTM2, Drift.RF, ARIMA.NNAR, ARIMA.LSTM1, ARIMA.XGB, ARIMA.LSTM2, ARIMA.RF, NNAR.LSTM1, NNAR.XGB, NNAR.LSTM2, NNAR.RF, LSTM1.XGB, LSTM1.LSTM2, LSTM1.RF, XGB.LSTM2, XGB.RF)
+xtable(Forecast.Accuracy.Two.Opt, digits = 3)
+
+write_xlsx(Forecast.Accuracy.Two.Opt,"Volatility.Forecast.Accuracy.Opt.Weight_AAPL.xlsx")
+
+```
+
+
+
+#### Summary of models (individual and optimal weights)
+
+```{r}
+Summary <- rbind.data.frame(Forecast.Accuracy.Ind, Forecast.Accuracy.Two.Opt)
+
+xtable(Summary, digits = 3)
+
+```
+
+
+```{r}
+# Find the row with the minimum value for each metric
+min_mae_row <- Summary[which.min(Summary$MAE), ]
+min_rmse_row <- Summary[which.min(Summary$RMSE), ]
+min_mape_row <- Summary[which.min(Summary$MAPE), ]
+
+# Display the rows
+cat("Row with minimum MAE:\n")
+print(min_mae_row)
+
+cat("\nRow with minimum RMSE:\n")
+print(min_rmse_row)
+
+cat("\nRow with minimum MAPE:\n")
+print(min_mape_row)
+
+```
+
+
+
+#### Forecast Error Sum of Squares (FESS) Plot for the Best Model (RMSE)
+
+```{r}
+find_optimal_weight_with_features <- function(name1, name2, Obs, Fore1, Fore2) {
+  # Define the sequence of weights to evaluate
+  Weight <- seq(0.01, 0.99, 0.01)
+  SSE_Weight <- rep(0, length(Weight))
+  T <- length(Obs)
+  
+  # Loop over each weight and calculate the SSE
+  for (i in 1:length(Weight)) {
+    Fore <- Weight[i] * Fore1 + (1 - Weight[i]) * Fore2
+    SSE <- sum((Obs - Fore)^2)
+    SSE_Weight[i] <- SSE
+  }
+  
+  # Find the optimal weight
+  Weight.Opt <- Weight[which.min(SSE_Weight)]
+  SSE.Min <- min(SSE_Weight)
+  
+  # Create the return data frame
+  result <- data.frame(
+    Model = paste(name1, name2, sep = "."),
+    Weight.Opt = Weight.Opt,
+    Complement.Weight = 1 - Weight.Opt
+  )
+  
+  colnames(result)[2:3] <- c('Model 1 Weight', 'Model 2 Weight')
+  
+  # Create a data frame for plotting
+  plot_data <- data.frame(Weight = Weight, SSE_Weight = SSE_Weight)
+  
+  # Plot SSE_Weight against Weight with additional features
+  p <- ggplot(plot_data, aes(x = Weight, y = SSE_Weight)) +
+    geom_line(color = "blue", size = 1) +
+    geom_vline(xintercept = Weight.Opt, color = "red", linetype = "dashed", size = 1) +
+    annotate(
+      "text", 
+      x = Weight.Opt + 0.05, 
+      y = SSE.Min + 0.05 * (max(SSE_Weight) - min(SSE_Weight)), 
+      label = paste0(round(Weight.Opt, 2)), 
+      color = "red", 
+      size = 4, 
+      hjust = 0.5  # Center text horizontally on the line
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(
+      title = paste(name1, name2, sep = "."),
+      x = "Weight",
+      y = "Forecast Error Sum of Squares (FESS)"
+    ) +
+    theme_minimal()
+  
+  print(p)
+  
+  return(result)
+}
+
+
+find_optimal_weight_with_features("LSTM1", "RF", test_data$AAPL, LSTM1.F, RF.F)
+
+```
+
+
+
